@@ -14,12 +14,19 @@ This project is a **Retrieval-Augmented Generation (RAG)** chatbot that answers 
 PDF_Rag/
 │
 ├── data/ # PDF files (e.g., reports, publications)
+
 ├── chroma/ # Local ChromaDB vector store
+
 ├── populate_database.py # Loads and embeds PDF data into vector DB
+
 ├── query_data.py # Handles user query and retrieves answers
+
 ├── test_rag.py # Script to run automated benchmark tests
+
 ├── requirements.txt # All required Python packages
+
 ├── .gitignore # Files/folders to ignore in version control
+
 └── README.md # Project instructions
 
 
@@ -27,17 +34,10 @@ PDF_Rag/
 
 ### 1. Clone the Repository
 
-```bash
-git clone https://github.com/yourusername/pdf-rag-chatbot.git
-cd pdf-rag-chatbot
-(If you uploaded files manually instead of cloning, just navigate to your project folder in the terminal.)
+1. Create and Activate a Virtual Environment
 
-2. Create and Activate a Virtual Environment
-bash
-Copy
-Edit
-python3 -m venv venv
-source venv/bin/activate   # On Windows: venv\Scripts\activate
+<pre> ```bash python3 -m venv venv source venv/bin/activate # On Windows: venv\Scripts\activate ``` </pre>
+
 3. Install Requirements
 bash
 Copy
