@@ -5,7 +5,7 @@ This project is a **Retrieval-Augmented Generation (RAG)** chatbot that answers 
 - **LangChain** for orchestration  
 - **ChromaDB** for vector storage  
 - **Ollama** for running a local LLM (e.g. `llama3`, `gemma:2b`)  
-- **FastAPI** for potential future deployment (optional)
+
 
 ---
 
