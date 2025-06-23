@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS system files
+.DS_Store
+
+# Local ChromaDB vector store (never commit this)
+chroma/
+.chroma/
+*.chroma/
+
+# Virtual environments
+venv/
+env/
+
+# Backup files
+backup/
+*.bak
+*.swp
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode and PyCharm settings (optional)
+.vscode/
+.idea/
