@@ -2,6 +2,6 @@ from langchain_ollama import OllamaEmbeddings
 
 def get_embedding_function():
     return OllamaEmbeddings(
-        model="nomic-embed-text:latest",  # ✅ use correct tag
+        model="nomic-embed-text:latest", 
         num_ctx=512
     )
