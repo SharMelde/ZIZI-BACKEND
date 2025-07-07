@@ -1,4 +1,5 @@
 import os
+import re
 import nltk
 from nltk.tokenize import sent_tokenize
 from sentence_transformers import SentenceTransformer, util
@@ -13,6 +14,20 @@ sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 DOCS_FOLDER = "docs"
 INDEX_FILE = "faiss_index"
+
+def clean_text(text: str) -> str:
+    """
+    Clean extracted text by fixing spacing and line breaks for better readability.
+    """
+    # Replace multiple newlines with a single newline
+    text = re.sub(r'\n{2,}', '\n', text)
+    # Replace single newlines inside paragraphs with space
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    # Replace multiple spaces with a single space
+    text = re.sub(r' +', ' ', text)
+    # Strip leading/trailing whitespace on each line
+    lines = [line.strip() for line in text.split('\n')]
+    return '\n'.join(lines)
 
 def load_documents(folder_path):
     documents = []
@@ -93,6 +108,9 @@ def get_response(query: str) -> dict:
 
     top_sentences = [cleaned_sentences[i] for i in sorted_indices[:2]]
     final_answer = "\n".join(f"- {s}" for s in top_sentences).strip()
+
+    # Clean final answer text for better formatting
+    final_answer = clean_text(final_answer)
 
     metadata = docs[0].metadata
     source_name = metadata.get("source", "Unknown document").split("\\")[-1]
