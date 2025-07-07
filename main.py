@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from fastapi import FastAPI
 from pydantic import BaseModel
 from rag import get_response
@@ -40,29 +39,3 @@ def feedback_endpoint(request: FeedbackRequest):
             f"Feedback: {request.feedback}\n\n"
         )
     return {"message": "✅ Feedback logged successfully."}
-=======
-# main.py
-from fastapi import FastAPI
-from pydantic import BaseModel
-from rag import get_response
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
-
-# Allow frontend requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # You can restrict to ["http://localhost:3000"] later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class QueryRequest(BaseModel):
-    query: str
-
-@app.post("/chat")
-def chat_endpoint(request: QueryRequest):
-    return {"response": get_response(request.query)}
-
->>>>>>> 21f128ad591456f412735795fb48f8b4568ea0bb
