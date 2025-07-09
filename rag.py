@@ -3,7 +3,7 @@ import re
 import nltk
 from nltk.tokenize import sent_tokenize
 from sentence_transformers import SentenceTransformer, util
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -16,18 +16,26 @@ DOCS_FOLDER = "docs"
 INDEX_FILE = "faiss_index"
 
 def clean_text(text: str) -> str:
-    """
-    Clean extracted text by fixing spacing and line breaks for better readability.
-    """
-    # Replace multiple newlines with a single newline
     text = re.sub(r'\n{2,}', '\n', text)
-    # Replace single newlines inside paragraphs with space
     text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-    # Replace multiple spaces with a single space
     text = re.sub(r' +', ' ', text)
-    # Strip leading/trailing whitespace on each line
     lines = [line.strip() for line in text.split('\n')]
     return '\n'.join(lines)
+
+def clean_sentence(sentence: str) -> str:
+    return re.sub(r"^[\s\-–•]*([a-zA-Z0-9]{1,2})[\.\)]\s+", "", sentence).strip()
+
+def remove_boilerplate(text: str) -> str:
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        line = line.strip()
+        if any(x in line.lower() for x in ["www.ziziafrique", "info@ziziafrique", "follow us", "annual report", "contents"]):
+            continue
+        if re.fullmatch(r"[0-9\s\W]+", line):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
 def load_documents(folder_path):
     documents = []
@@ -35,8 +43,11 @@ def load_documents(folder_path):
         if filename.endswith(".pdf"):
             file_path = os.path.join(folder_path, filename)
             print(f"📄 Loading: {file_path}")
-            loader = PyPDFLoader(file_path)
-            documents.extend(loader.load())
+            loader = PyMuPDFLoader(file_path)
+            pages = loader.load()
+            for page in pages:
+                page.page_content = remove_boilerplate(page.page_content)
+            documents.extend(pages)
     return documents
 
 def create_or_load_faiss_index():
@@ -76,8 +87,32 @@ def get_response(query: str) -> dict:
     if not query.strip():
         return {"answer": "❗ Please enter a valid query.", "source": None}
 
+    # Detect expected year from the query
+    expected_year = None
+    known_years = ["2020", "2021", "2022", "2023", "2024"]
+    for y in known_years:
+        if y in query:
+            expected_year = y
+            break
+
+    # Heuristic: if asking about "future", "beyond", "next year" etc., set default to 2023+
+    future_keywords = ["2024", "beyond", "future", "next year", "vision", "looking ahead"]
+    if any(k in query.lower() for k in future_keywords):
+        expected_year = "2023"
+
     docs = db.similarity_search(query, k=5)
     print(f"📄 Chunks retrieved: {len(docs)}")
+
+    # Prefer docs from expected year and newer (e.g., 2023+ for "2024 goals")
+    if expected_year:
+        try:
+            year = int(expected_year)
+            docs = [
+                d for d in docs
+                if any(str(y) in d.metadata.get("source", "") for y in range(year, 2031))
+            ] or docs
+        except:
+            pass
 
     if not docs:
         return {"answer": "❗ Sorry, no relevant information found.", "source": None}
@@ -90,15 +125,26 @@ def get_response(query: str) -> dict:
     seen = set()
     for s in sentences:
         s = s.strip()
-        if s.lower().startswith("zizi afrique") or "www." in s.lower():
+        if "www." in s.lower() or "http" in s.lower():
             continue
-        if len(s.split()) >= 6 and s not in seen:
+        if "@" in s or "Follow us" in s or "Annual Report" in s or "Contents" in s:
+            continue
+        if len(re.sub(r'[^a-zA-Z]', '', s)) < 20:
+            continue
+        if len(s.split()) >= 4 and s not in seen:
             cleaned_sentences.append(s)
             seen.add(s)
 
-    print(f"✅ Clean sentences retained: {len(cleaned_sentences)}")
     if not cleaned_sentences:
-        return {"answer": "❗ No useful sentences found.", "source": None}
+        print("⚠️ Fallback: Using raw chunk content.")
+        fallback = clean_text(sentences[0]) if sentences else ""
+        redirect = "You can find more in the full report at https://www.ziziafrique.org"
+        return {
+            "answer": f"{fallback}\n\n{redirect}".strip(),
+            "source": docs[0].metadata.get("source", "Unknown source")
+        }
+
+    print(f"✅ Clean sentences retained: {len(cleaned_sentences)}")
 
     sentence_embeddings = sentence_model.encode(cleaned_sentences)
     query_embedding = sentence_model.encode(query)
@@ -106,10 +152,8 @@ def get_response(query: str) -> dict:
     similarities = util.cos_sim(query_embedding, sentence_embeddings)[0]
     sorted_indices = similarities.argsort(descending=True)
 
-    top_sentences = [cleaned_sentences[i] for i in sorted_indices[:2]]
-    final_answer = "\n".join(f"- {s}" for s in top_sentences).strip()
-
-    # Clean final answer text for better formatting
+    top_sentences = [clean_sentence(cleaned_sentences[i]) for i in sorted_indices[:3]]
+    final_answer = " ".join(top_sentences).strip()
     final_answer = clean_text(final_answer)
 
     metadata = docs[0].metadata
@@ -124,3 +168,10 @@ def get_response(query: str) -> dict:
         "answer": final_answer or "❗ Sorry, I couldn't find a good answer.",
         "source": source_text
     }
+
+
+
+
+
+
+
