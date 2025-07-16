@@ -1,3 +1,4 @@
+# === START OF rag.py ===
 import os
 import re
 import nltk
@@ -7,13 +8,17 @@ from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
+import pytesseract
+from pdf2image import convert_from_path
+from PIL import Image
+import fitz  # PyMuPDF
 
 nltk.download("punkt")
 
-sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-
 DOCS_FOLDER = "docs"
 INDEX_FILE = "faiss_index"
+sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
+pytesseract.pytesseract.tesseract_cmd = r"C:\Users\Grants Intern\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
 def clean_text(text: str) -> str:
     text = re.sub(r'\n{2,}', '\n', text)
@@ -25,29 +30,77 @@ def clean_text(text: str) -> str:
 def clean_sentence(sentence: str) -> str:
     return re.sub(r"^[\s\-–•]*([a-zA-Z0-9]{1,2})[\.\)]\s+", "", sentence).strip()
 
-def remove_boilerplate(text: str) -> str:
-    lines = text.split("\n")
-    cleaned = []
-    for line in lines:
-        line = line.strip()
-        if any(x in line.lower() for x in ["www.ziziafrique", "info@ziziafrique", "follow us", "annual report", "contents"]):
-            continue
-        if re.fullmatch(r"[0-9\s\W]+", line):
-            continue
-        cleaned.append(line)
-    return "\n".join(cleaned)
+def find_links(text: str) -> list:
+    return re.findall(r'(https?://[^\s)]+)', text)
+
+def enrich_with_keywords(sentences, keywords):
+    enriched = []
+    for sent, meta in sentences:
+        if any(k.lower() in sent.lower() for k in keywords):
+            enriched.append((sent, meta))
+    return enriched
+
+def ocr_page(image):
+    return pytesseract.image_to_string(image)
+
+def convert_page_to_image(pdf_path, page_number):
+    images = convert_from_path(pdf_path, first_page=page_number+1, last_page=page_number+1)
+    return images[0] if images else None
 
 def load_documents(folder_path):
     documents = []
     for filename in os.listdir(folder_path):
-        if filename.endswith(".pdf"):
-            file_path = os.path.join(folder_path, filename)
-            print(f"📄 Loading: {file_path}")
-            loader = PyMuPDFLoader(file_path)
-            pages = loader.load()
-            for page in pages:
-                page.page_content = remove_boilerplate(page.page_content)
-            documents.extend(pages)
+        if not filename.lower().endswith(".pdf"):
+            continue
+
+        file_path = os.path.join(folder_path, filename)
+        print(f"📄 Processing: {file_path}")
+        year_match = re.search(r'20\d{2}', filename)
+        year_tag = year_match.group(0) if year_match else "unknown"
+
+        try:
+            doc = fitz.open(file_path)
+            for page_number in range(len(doc)):
+                page = doc.load_page(page_number)
+                text = clean_text(page.get_text())
+                metadata = {
+                    'source': file_path,
+                    'page': str(page_number + 1),
+                    'year': year_tag
+                }
+
+                if not text or len(text.strip()) < 20:
+                    print(f"🔍 Page {page_number + 1}: Low content — trying OCR...")
+                    image = convert_page_to_image(file_path, page_number)
+                    if image:
+                        raw_ocr = ocr_page(image)
+                        lines = [line.strip() for line in raw_ocr.split('\n') if line.strip()]
+                        merged_lines = []
+                        prev = ""
+                        for line in lines:
+                            if re.search(r'\d', line) and re.search(r'(amount|raised|reached|beneficiaries|KES|shillings?)', prev, re.I):
+                                merged_lines.append(prev + " " + line)
+                                prev = ""
+                            else:
+                                if prev:
+                                    merged_lines.append(prev)
+                                prev = line
+                        if prev:
+                            merged_lines.append(prev)
+                        text = clean_text("\n".join(merged_lines))
+                        metadata["ocr"] = True
+
+                if len(text.split()) < 10:
+                    continue
+
+                documents.append(
+                    type('SimpleDoc', (), {
+                        'page_content': text,
+                        'metadata': metadata
+                    })()
+                )
+        except Exception as e:
+            print(f"❌ Failed to load {filename}: {e}")
     return documents
 
 def create_or_load_faiss_index():
@@ -63,8 +116,8 @@ def create_or_load_faiss_index():
     if not docs:
         raise ValueError("❗ No PDF files found in the 'docs/' folder.")
 
-    print(f"✅ Loaded {len(docs)} raw documents.")
-    text_splitter = CharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+    print(f"✅ Loaded {len(docs)} cleaned documents.")
+    text_splitter = CharacterTextSplitter(chunk_size=300, chunk_overlap=100)
     split_docs = text_splitter.split_documents(docs)
 
     if not split_docs:
@@ -83,95 +136,105 @@ db = create_or_load_faiss_index()
 
 def get_response(query: str) -> dict:
     print(f"\n🔎 Received query: {query}")
-
     if not query.strip():
-        return {"answer": "❗ Please enter a valid query.", "source": None}
+        return {"answer": "❗ Please enter a valid query.", "source": None, "more_info": None}
 
-    # Detect expected year from the query
-    expected_year = None
-    known_years = ["2020", "2021", "2022", "2023", "2024"]
-    for y in known_years:
-        if y in query:
-            expected_year = y
-            break
+    all_docs = db.similarity_search(query, k=20)
+    print(f"📄 Chunks retrieved: {len(all_docs)}")
 
-    # Heuristic: if asking about "future", "beyond", "next year" etc., set default to 2023+
-    future_keywords = ["2024", "beyond", "future", "next year", "vision", "looking ahead"]
-    if any(k in query.lower() for k in future_keywords):
-        expected_year = "2023"
+    question_years = re.findall(r"20\d{2}", query)
+    target_year = question_years[0] if question_years else None
+    print(f"🎯 Target year from question: {target_year}")
 
-    docs = db.similarity_search(query, k=5)
-    print(f"📄 Chunks retrieved: {len(docs)}")
+    if target_year:
+        year_docs = [d for d in all_docs if d.metadata.get("year") == target_year]
+        print(f"📅 Matching year chunks: {len(year_docs)}")
+    else:
+        year_docs = all_docs[:10]
 
-    # Prefer docs from expected year and newer (e.g., 2023+ for "2024 goals")
-    if expected_year:
-        try:
-            year = int(expected_year)
-            docs = [
-                d for d in docs
-                if any(str(y) in d.metadata.get("source", "") for y in range(year, 2031))
-            ] or docs
-        except:
-            pass
+    def score_chunk(doc):
+        score = 0
+        content = doc.page_content.lower()
+        if 'tenda wema' in content and 'kes' in content:
+            score += 20
+        if re.search(r'\bKES\b|\bUSD\b|\d{5,}|\d+%|\bshillings?\b', content, re.IGNORECASE):
+            score += 10
+        if target_year and target_year in content:
+            score += 5
+        if doc.metadata.get("ocr"):
+            score += 2
+        if re.search(r'(grade.level|proficiency|competency)', content):
+            score += 8
+        if re.search(r'(pillar|strategic (focus|area|priority))', content) and re.search(r'(education|inclusion|policy|equity|data)', content):
+            score += 12
+        return score
 
-    if not docs:
-        return {"answer": "❗ Sorry, no relevant information found.", "source": None}
+    scored_docs = sorted(year_docs, key=score_chunk, reverse=True)
+    top_docs = scored_docs if scored_docs else year_docs[:5]
 
-    combined_text = " ".join([doc.page_content for doc in docs])
-    sentences = sent_tokenize(combined_text)
-    print(f"📝 Sentences extracted: {len(sentences)}")
-
-    cleaned_sentences = []
+    all_sentences = []
+    fallback_numeric = []
     seen = set()
-    for s in sentences:
-        s = s.strip()
-        if "www." in s.lower() or "http" in s.lower():
-            continue
-        if "@" in s or "Follow us" in s or "Annual Report" in s or "Contents" in s:
-            continue
-        if len(re.sub(r'[^a-zA-Z]', '', s)) < 20:
-            continue
-        if len(s.split()) >= 4 and s not in seen:
-            cleaned_sentences.append(s)
-            seen.add(s)
 
-    if not cleaned_sentences:
-        print("⚠️ Fallback: Using raw chunk content.")
-        fallback = clean_text(sentences[0]) if sentences else ""
-        redirect = "You can find more in the full report at https://www.ziziafrique.org"
-        return {
-            "answer": f"{fallback}\n\n{redirect}".strip(),
-            "source": docs[0].metadata.get("source", "Unknown source")
-        }
+    for doc in top_docs:
+        for sent in sent_tokenize(doc.page_content):
+            s_clean = clean_sentence(sent.strip())
+            if not s_clean or s_clean.lower().startswith("zizi afrique") or s_clean in seen:
+                continue
+            seen.add(s_clean)
+            if len(s_clean.split()) >= 3:
+                all_sentences.append((s_clean, doc.metadata))
+            elif re.search(r'\bKES\b|\d{5,}', s_clean):
+                fallback_numeric.append((s_clean, doc.metadata))
 
-    print(f"✅ Clean sentences retained: {len(cleaned_sentences)}")
+    if not all_sentences and fallback_numeric:
+        print(f"💰 Fallback to numeric-only ({len(fallback_numeric)} lines)")
+        all_sentences = fallback_numeric
+    elif fallback_numeric:
+        all_sentences += fallback_numeric
 
-    sentence_embeddings = sentence_model.encode(cleaned_sentences)
+    if not all_sentences:
+        return {"answer": "❗ No useful sentences found.", "source": None, "more_info": None}
+
+    sentences = [s for s, _ in all_sentences]
+    embeddings = sentence_model.encode(sentences)
     query_embedding = sentence_model.encode(query)
-
-    similarities = util.cos_sim(query_embedding, sentence_embeddings)[0]
+    similarities = util.cos_sim(query_embedding, embeddings)[0]
     sorted_indices = similarities.argsort(descending=True)
 
-    top_sentences = [clean_sentence(cleaned_sentences[i]) for i in sorted_indices[:3]]
-    final_answer = " ".join(top_sentences).strip()
-    final_answer = clean_text(final_answer)
+    top_lines = [sentences[i] for i in sorted_indices[:5]]
 
-    metadata = docs[0].metadata
-    source_name = metadata.get("source", "Unknown document").split("\\")[-1]
-    page_number = metadata.get("page", "Unknown page")
+    # 📊 Grade-level % special check
+    if re.search(r'grade.?level|proficiency|competency', query, re.I):
+        percent_lines = [s for s in sentences if re.search(r'\d{1,3}%|\d{1,3}\.\d+%', s)]
+        percent_lines = [s for s in percent_lines if re.search(r'proficien|grade.?level|competenc', s, re.I)]
+        if percent_lines:
+            top_lines = percent_lines[:2] + top_lines
+
+    # 🎯 Strategic pillars enrichment
+    elif re.search(r'strategic|pillar|focus area|priority', query, re.I):
+        enriched = enrich_with_keywords(all_sentences, ["pillar", "focus", "strategy", "priority", "education", "equity", "policy", "inclusion"])
+        enriched_lines = [s for s, _ in enriched]
+        if enriched_lines:
+            top_lines = enriched_lines[:2] + top_lines
+
+    # 🎯 Attempt smart formatting
+    amount_line = next((line for line in top_lines if re.search(r'KES\s?[\d,.]+', line)), "")
+    reach_line = next((line for line in top_lines if re.search(r'\b\d{1,3}(,\d{3})*\b.*?(children|youth|learners|beneficiaries)', line, re.I)), "")
+    joined = f"{amount_line.strip()} {reach_line.strip()}".strip() if amount_line or reach_line else clean_text(" ".join(top_lines[:2]))
+
+    top_meta = all_sentences[sorted_indices[0]][1]
+    source_name = top_meta.get("source", "Unknown").split("\\")[-1]
+    page_number = top_meta.get("page", "Unknown")
     source_text = f"{source_name} — Page {page_number}"
 
-    print(f"✅ Final answer: {final_answer}")
-    print(f"🔗 Source: {source_text}")
+    links = []
+    for i in sorted_indices[:5]:
+        links += find_links(sentences[i])
+    links = list(set(links))
 
     return {
-        "answer": final_answer or "❗ Sorry, I couldn't find a good answer.",
-        "source": source_text
+        "answer": joined or "❗ Sorry, I couldn't find a good answer.",
+        "source": source_text,
+        "more_info": links[0] if links else None
     }
-
-
-
-
-
-
-
