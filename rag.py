@@ -33,10 +33,10 @@ def clean_sentence(sentence: str) -> str:
 def find_links(text: str) -> list:
     return re.findall(r'(https?://[^\s)]+)', text)
 
-def enrich_with_keywords(sentences, keywords):
+def get_enriched_lines(sentences, keywords):
     enriched = []
     for sent, meta in sentences:
-        if any(k.lower() in sent.lower() for k in keywords):
+        if any(kw.lower() in sent.lower() for kw in keywords):
             enriched.append((sent, meta))
     return enriched
 
@@ -46,6 +46,14 @@ def ocr_page(image):
 def convert_page_to_image(pdf_path, page_number):
     images = convert_from_path(pdf_path, first_page=page_number+1, last_page=page_number+1)
     return images[0] if images else None
+
+def summarize_table_lines(lines):
+    summaries = []
+    for line in lines:
+        if re.search(r'\d', line) and re.search(r'(children|youth|teachers?|parents?|partners?|officials?|beneficiaries|reached)', line, re.I):
+            line = re.sub(r'\s+', ' ', line.strip())
+            summaries.append(line)
+    return "\n".join(summaries)
 
 def load_documents(folder_path):
     documents = []
@@ -75,19 +83,9 @@ def load_documents(folder_path):
                     if image:
                         raw_ocr = ocr_page(image)
                         lines = [line.strip() for line in raw_ocr.split('\n') if line.strip()]
-                        merged_lines = []
-                        prev = ""
-                        for line in lines:
-                            if re.search(r'\d', line) and re.search(r'(amount|raised|reached|beneficiaries|KES|shillings?)', prev, re.I):
-                                merged_lines.append(prev + " " + line)
-                                prev = ""
-                            else:
-                                if prev:
-                                    merged_lines.append(prev)
-                                prev = line
-                        if prev:
-                            merged_lines.append(prev)
-                        text = clean_text("\n".join(merged_lines))
+                        summary = summarize_table_lines(lines)
+                        merged = clean_text("\n".join(lines))
+                        text = f"{summary}\n\n{merged}" if summary else merged
                         metadata["ocr"] = True
 
                 if len(text.split()) < 10:
@@ -117,7 +115,7 @@ def create_or_load_faiss_index():
         raise ValueError("❗ No PDF files found in the 'docs/' folder.")
 
     print(f"✅ Loaded {len(docs)} cleaned documents.")
-    text_splitter = CharacterTextSplitter(chunk_size=300, chunk_overlap=100)
+    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
     split_docs = text_splitter.split_documents(docs)
 
     if not split_docs:
@@ -167,10 +165,29 @@ def get_response(query: str) -> dict:
             score += 8
         if re.search(r'(pillar|strategic (focus|area|priority))', content) and re.search(r'(education|inclusion|policy|equity|data)', content):
             score += 12
+        if re.search(r'(action point|priority|objective|2023.?2025|consolidate|innovate|engage)', content):
+            score += 15
         return score
 
     scored_docs = sorted(year_docs, key=score_chunk, reverse=True)
     top_docs = scored_docs if scored_docs else year_docs[:5]
+
+    # Extract bullets or numbered resolutions
+    if re.search(r'\b(resolution|outcome|agreed|conclusion|result|decision|recommendation|commitment|goal)\b', query, re.I):
+        for doc in top_docs:
+            lines = doc.page_content.splitlines()
+            bullet_lines = [line.strip() for line in lines if line.strip().startswith("•")]
+            numbered_lines = [line.strip() for line in lines if re.match(r'^\s*(\d{1,2}[\.\)])\s+', line.strip())]
+
+            if bullet_lines or numbered_lines:
+                formatted = "\n".join(bullet_lines or numbered_lines)
+                source_name = doc.metadata.get("source", "Unknown").split("\\")[-1]
+                page_number = doc.metadata.get("page", "Unknown")
+                return {
+                    "answer": f"The following resolutions were highlighted:\n{formatted}",
+                    "source": f"{source_name} — Page {page_number}",
+                    "more_info": None
+                }
 
     all_sentences = []
     fallback_numeric = []
@@ -201,24 +218,27 @@ def get_response(query: str) -> dict:
     query_embedding = sentence_model.encode(query)
     similarities = util.cos_sim(query_embedding, embeddings)[0]
     sorted_indices = similarities.argsort(descending=True)
-
     top_lines = [sentences[i] for i in sorted_indices[:5]]
 
-    # 📊 Grade-level % special check
+    # Thematic enrichment
     if re.search(r'grade.?level|proficiency|competency', query, re.I):
         percent_lines = [s for s in sentences if re.search(r'\d{1,3}%|\d{1,3}\.\d+%', s)]
         percent_lines = [s for s in percent_lines if re.search(r'proficien|grade.?level|competenc', s, re.I)]
         if percent_lines:
             top_lines = percent_lines[:2] + top_lines
 
-    # 🎯 Strategic pillars enrichment
-    elif re.search(r'strategic|pillar|focus area|priority', query, re.I):
-        enriched = enrich_with_keywords(all_sentences, ["pillar", "focus", "strategy", "priority", "education", "equity", "policy", "inclusion"])
+    elif re.search(r'(strategic|pillar|focus area|priority)', query, re.I):
+        enriched = get_enriched_lines(all_sentences, ["pillar", "focus", "strategy", "priority", "education", "equity", "policy", "inclusion"])
         enriched_lines = [s for s, _ in enriched]
         if enriched_lines:
             top_lines = enriched_lines[:2] + top_lines
 
-    # 🎯 Attempt smart formatting
+    elif re.search(r'(action point|objective|2023.?2025|mission|vision)', query, re.I):
+        enriched = get_enriched_lines(all_sentences, ["action point", "2023–2025", "mission", "consolidate", "engage", "innovate"])
+        enriched_lines = [s for s, _ in enriched]
+        if enriched_lines:
+            top_lines = enriched_lines[:3] + top_lines
+
     amount_line = next((line for line in top_lines if re.search(r'KES\s?[\d,.]+', line)), "")
     reach_line = next((line for line in top_lines if re.search(r'\b\d{1,3}(,\d{3})*\b.*?(children|youth|learners|beneficiaries)', line, re.I)), "")
     joined = f"{amount_line.strip()} {reach_line.strip()}".strip() if amount_line or reach_line else clean_text(" ".join(top_lines[:2]))
@@ -238,3 +258,5 @@ def get_response(query: str) -> dict:
         "source": source_text,
         "more_info": links[0] if links else None
     }
+
+# === END OF rag.py ===
