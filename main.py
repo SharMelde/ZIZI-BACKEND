@@ -1,72 +1,64 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime
-import uuid
-from rag import get_response
-import re
-
+from rag import get_response, get_history, clear_history, store_feedback
 
 app = FastAPI()
 
-origins = [
-    "http://localhost:3000",  # local dev frontend
-    "http://127.0.0.1:3000",
-    "https://zizi-chatbot.vercel.app",  # replace with deployed frontend if any
-]
-
+# CORS Configuration (allow all for dev — restrict in prod)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Replace with ["http://localhost:3000"] or actual domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --- Models --- #
+
 class QueryRequest(BaseModel):
     question: str
 
-from typing import Optional
-
-class QueryResponse(BaseModel):
+class FeedbackRequest(BaseModel):
+    query: str
     answer: str
-    source: Optional[str] = None
-    more_info: Optional[str] = None
+    source: str
+    feedback: str  # "thumbs_up" or "thumbs_down"
 
-history_log = []
+# --- Routes --- #
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query")
 def query(request: QueryRequest):
+    """
+    Receive a question and return an answer with sources.
+    """
     result = get_response(request.question)
-
-    # Clean up answer formatting for frontend
-    clean_answer = result["answer"].strip()
-
-    # Convert • and numbered lines to Markdown-style dash bullets for web UI
-    lines = clean_answer.split("\n")
-    formatted_lines = []
-    for line in lines:
-        if re.match(r'^(\d+[\.\)]|[a-zA-Z][\.\)]|[-•–])\s+', line):
-            formatted_lines.append(f"- {re.sub(r'^(\d+[\.\)]|[a-zA-Z][\.\)]|[-•–])\s+', '', line)}")
-        else:
-            formatted_lines.append(line)
-    display_answer = "\n".join(formatted_lines)
-
-    # Save query to in-memory log (later can move to file/db)
-    history_log.append({
-        "id": str(uuid.uuid4()),
-        "timestamp": datetime.now().isoformat(),
-        "question": request.question.strip(),
-        "answer": display_answer,
-        "source": result.get("source")
-    })
-
-    return QueryResponse(
-        answer=display_answer,
-        source=result.get("source"),
-        more_info=result.get("more_info")
-    )
+    return result  # Dict with {"answer": ..., "sources": ...}
 
 @app.get("/history")
-def get_history():
-    return history_log
+def history():
+    """
+    Return the saved list of past questions/answers.
+    """
+    return get_history()
+
+@app.post("/clear-history")
+def clear():
+    """
+    Delete all chatbot history.
+    """
+    clear_history()
+    return {"message": "History cleared"}
+
+@app.post("/feedback")
+def feedback(request: FeedbackRequest):
+    """
+    Store user feedback on an answer.
+    """
+    store_feedback(
+        query=request.query,
+        answer=request.answer,
+        source=request.source,
+        feedback=request.feedback
+    )
+    return {"message": "Feedback recorded"}
